@@ -216,11 +216,14 @@ private:
             
             __int128 carry = 0;
             for (int j = 0; j < mm; j++) {
-                __int128 prod = (__int128)qhat * bb[j];
-                long long cur = aa[i+j] - (long long)carry - (long long)(prod % BASE);
+                __int128 prod = (__int128)qhat * bb[j] + carry;
+                __int128 diff = (__int128)aa[i+j] - (long long)(prod % BASE);
                 carry = prod / BASE;
-                if (cur < 0) { cur += BASE; carry++; }
-                aa[i+j] = cur;
+                if (diff < 0) {
+                    diff += BASE;
+                    carry++;
+                }
+                aa[i+j] = (long long)diff;
             }
             if (i+mm < (int)aa.size()) aa[i+mm] -= (long long)carry;
             
