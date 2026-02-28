@@ -1,0 +1,840 @@
+#pragma once
+#ifndef SJTU_BIGINTEGER
+#define SJTU_BIGINTEGER
+
+#include <complex>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+
+namespace sjtu {
+
+// Base: store multiple digits per element for efficiency
+// Using base 10^9 for digit compression
+static const long long BASE = 1000000000LL;
+static const int BASE_DIGITS = 9;
+
+class int2048 {
+private:
+    // digits stored in little-endian order (least significant first)
+    // each element stores up to BASE_DIGITS decimal digits
+    std::vector<long long> digits;
+    bool negative;
+
+    void trim() {
+        while (digits.size() > 1 && digits.back() == 0)
+            digits.pop_back();
+        if (digits.size() == 1 && digits[0] == 0)
+            negative = false;
+    }
+
+    // Compare absolute values: -1 if |this| < |other|, 0 if equal, 1 if |this| > |other|
+    int cmpAbs(const int2048 &other) const {
+        if (digits.size() != other.digits.size())
+            return digits.size() < other.digits.size() ? -1 : 1;
+        for (int i = (int)digits.size() - 1; i >= 0; i--) {
+            if (digits[i] != other.digits[i])
+                return digits[i] < other.digits[i] ? -1 : 1;
+        }
+        return 0;
+    }
+
+    // Add absolute values (assuming same sign)
+    static std::vector<long long> addAbs(const std::vector<long long> &a, const std::vector<long long> &b) {
+        int n = std::max(a.size(), b.size());
+        std::vector<long long> result(n + 1, 0);
+        for (int i = 0; i < n; i++) {
+            long long va = i < (int)a.size() ? a[i] : 0;
+            long long vb = i < (int)b.size() ? b[i] : 0;
+            result[i] += va + vb;
+            if (result[i] >= BASE) {
+                result[i + 1] += result[i] / BASE;
+                result[i] %= BASE;
+            }
+        }
+        while (result.size() > 1 && result.back() == 0)
+            result.pop_back();
+        return result;
+    }
+
+    // Subtract absolute values: |a| - |b|, assuming |a| >= |b|
+    static std::vector<long long> subAbs(const std::vector<long long> &a, const std::vector<long long> &b) {
+        int n = a.size();
+        std::vector<long long> result(n, 0);
+        long long borrow = 0;
+        for (int i = 0; i < n; i++) {
+            long long va = a[i];
+            long long vb = i < (int)b.size() ? b[i] : 0;
+            result[i] = va - vb - borrow;
+            if (result[i] < 0) {
+                result[i] += BASE;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+        }
+        while (result.size() > 1 && result.back() == 0)
+            result.pop_back();
+        return result;
+    }
+
+    // FFT-based multiplication using NTT (Number Theoretic Transform)
+    // We'll use double-precision FFT for simplicity but split digits to avoid precision issues
+    
+    static const int MOD1 = 998244353;
+    static const int MOD2 = 985661441;
+    static const int MOD3 = 754974721;
+    
+    static long long power(long long a, long long b, long long mod) {
+        long long res = 1;
+        a %= mod;
+        while (b > 0) {
+            if (b & 1) res = res * a % mod;
+            a = a * a % mod;
+            b >>= 1;
+        }
+        return res;
+    }
+    
+    static void ntt(std::vector<long long> &a, bool inv, long long mod) {
+        int n = a.size();
+        for (int i = 1, j = 0; i < n; i++) {
+            int bit = n >> 1;
+            for (; j & bit; bit >>= 1) j ^= bit;
+            j ^= bit;
+            if (i < j) std::swap(a[i], a[j]);
+        }
+        for (int len = 2; len <= n; len <<= 1) {
+            long long w;
+            if (mod == MOD1) w = inv ? power(3, mod - 1 - (mod - 1) / len, mod) : power(3, (mod - 1) / len, mod);
+            else if (mod == MOD2) w = inv ? power(3, mod - 1 - (mod - 1) / len, mod) : power(3, (mod - 1) / len, mod);
+            else w = inv ? power(11, mod - 1 - (mod - 1) / len, mod) : power(11, (mod - 1) / len, mod);
+            for (int i = 0; i < n; i += len) {
+                long long wn = 1;
+                for (int j = 0; j < len / 2; j++) {
+                    long long u = a[i + j];
+                    long long v = a[i + j + len / 2] * wn % mod;
+                    a[i + j] = (u + v) % mod;
+                    a[i + j + len / 2] = (u - v + mod) % mod;
+                    wn = wn * w % mod;
+                }
+            }
+        }
+        if (inv) {
+            long long inv_n = power(n, mod - 2, mod);
+            for (auto &x : a) x = x * inv_n % mod;
+        }
+    }
+    
+    // CRT for 3 NTT moduli
+    static std::vector<long long> mulNTT(const std::vector<long long> &a, const std::vector<long long> &b) {
+        int result_size = a.size() + b.size() - 1;
+        int n = 1;
+        while (n < result_size) n <<= 1;
+        
+        // Split each digit into two parts to avoid overflow
+        // Since BASE = 10^9, each digit < 10^9
+        // We use 3-mod NTT with CRT
+        
+        auto doNTT = [&](long long mod) -> std::vector<long long> {
+            std::vector<long long> fa(n, 0), fb(n, 0);
+            for (int i = 0; i < (int)a.size(); i++) fa[i] = a[i] % mod;
+            for (int i = 0; i < (int)b.size(); i++) fb[i] = b[i] % mod;
+            ntt(fa, false, mod);
+            ntt(fb, false, mod);
+            for (int i = 0; i < n; i++) fa[i] = fa[i] * fb[i] % mod;
+            ntt(fa, true, mod);
+            return fa;
+        };
+        
+        auto r1 = doNTT(MOD1);
+        auto r2 = doNTT(MOD2);
+        auto r3 = doNTT(MOD3);
+        
+        // CRT reconstruction
+        long long m1 = MOD1, m2 = MOD2, m3 = MOD3;
+        long long m1_inv_m2 = power(m1, m2 - 2, m2);
+        long long m12_inv_m3 = power((long long)m1 * m2 % m3, m3 - 2, m3);
+        
+        std::vector<long long> result(result_size, 0);
+        for (int i = 0; i < result_size; i++) {
+            long long a1 = r1[i];
+            long long a2 = (r2[i] - a1 % m2 + m2) % m2 * m1_inv_m2 % m2;
+            // val = a1 + a2 * m1
+            // need to find a3 such that val + a3 * m1 * m2 ≡ r3[i] (mod m3)
+            long long val_mod_m3 = (a1 + (__int128)a2 * m1) % m3;
+            long long a3 = ((r3[i] - val_mod_m3 + m3) % m3) * m12_inv_m3 % m3;
+            // val = a1 + a2*m1 + a3*m1*m2 (can be very large, use __int128)
+            __int128 val = a1 + (__int128)a2 * m1 + (__int128)a3 * m1 * m2;
+            result[i] = (long long)val;
+        }
+        
+        // Propagate carries
+        __int128 carry = 0;
+        for (int i = 0; i < (int)result.size(); i++) {
+            __int128 cur = result[i] + carry;
+            result[i] = (long long)(cur % BASE);
+            carry = cur / BASE;
+        }
+        while (carry > 0) {
+            result.push_back((long long)(carry % BASE));
+            carry /= BASE;
+        }
+        while (result.size() > 1 && result.back() == 0)
+            result.pop_back();
+        return result;
+    }
+    
+    // Simple O(n^2) multiplication for small inputs
+    static std::vector<long long> mulSimple(const std::vector<long long> &a, const std::vector<long long> &b) {
+        int n = a.size() + b.size();
+        std::vector<long long> result(n, 0);
+        for (int i = 0; i < (int)a.size(); i++) {
+            __int128 carry = 0;
+            for (int j = 0; j < (int)b.size(); j++) {
+                __int128 cur = (__int128)a[i] * b[j] + result[i + j] + carry;
+                result[i + j] = (long long)(cur % BASE);
+                carry = cur / BASE;
+            }
+            int k = i + b.size();
+            while (carry > 0) {
+                __int128 cur = result[k] + carry;
+                result[k] = (long long)(cur % BASE);
+                carry = cur / BASE;
+                k++;
+            }
+        }
+        while (result.size() > 1 && result.back() == 0)
+            result.pop_back();
+        return result;
+    }
+    
+    static std::vector<long long> mulDigits(const std::vector<long long> &a, const std::vector<long long> &b) {
+        if (a.size() == 1 && a[0] == 0) return {0};
+        if (b.size() == 1 && b[0] == 0) return {0};
+        if (a.size() <= 64 || b.size() <= 64)
+            return mulSimple(a, b);
+        return mulNTT(a, b);
+    }
+
+    // Division: compute a / b (floor division toward negative infinity)
+    // Using Newton's method for large divisions, schoolbook for small
+    
+    // Shift left by k positions (multiply by BASE^k)
+    static std::vector<long long> shiftLeft(const std::vector<long long> &a, int k) {
+        if (a.size() == 1 && a[0] == 0) return {0};
+        std::vector<long long> result(k + a.size(), 0);
+        for (int i = 0; i < (int)a.size(); i++)
+            result[i + k] = a[i];
+        return result;
+    }
+    
+    // Shift right by k positions (divide by BASE^k, truncate)
+    static std::vector<long long> shiftRight(const std::vector<long long> &a, int k) {
+        if (k >= (int)a.size()) return {0};
+        std::vector<long long> result(a.size() - k);
+        for (int i = k; i < (int)a.size(); i++)
+            result[i - k] = a[i];
+        while (result.size() > 1 && result.back() == 0)
+            result.pop_back();
+        return result;
+    }
+    
+    // Take first n digits (from the least significant)
+    static std::vector<long long> truncate(const std::vector<long long> &a, int n) {
+        if (n >= (int)a.size()) return a;
+        std::vector<long long> result(a.begin(), a.begin() + n);
+        while (result.size() > 1 && result.back() == 0)
+            result.pop_back();
+        return result;
+    }
+    
+    // Compare absolute digit vectors
+    static int cmpDigits(const std::vector<long long> &a, const std::vector<long long> &b) {
+        if (a.size() != b.size())
+            return a.size() < b.size() ? -1 : 1;
+        for (int i = (int)a.size() - 1; i >= 0; i--) {
+            if (a[i] != b[i])
+                return a[i] < b[i] ? -1 : 1;
+        }
+        return 0;
+    }
+    
+    static std::vector<long long> addDigits(const std::vector<long long> &a, const std::vector<long long> &b) {
+        return addAbs(a, b);
+    }
+    
+    // a - b, assuming a >= b
+    static std::vector<long long> subDigits(const std::vector<long long> &a, const std::vector<long long> &b) {
+        return subAbs(a, b);
+    }
+    
+    // schoolbook division: compute q = a / b, where a and b are positive digit vectors
+    // Returns quotient
+    static std::vector<long long> divSimple(const std::vector<long long> &a, const std::vector<long long> &b) {
+        if (cmpDigits(a, b) < 0) return {0};
+        
+        int n = a.size(), m = b.size();
+        int qlen = n - m + 1;
+        std::vector<long long> q(qlen, 0);
+        
+        // Current remainder
+        std::vector<long long> rem;
+        
+        for (int i = n - 1; i >= 0; i--) {
+            // Shift rem left by 1 and add a[i]
+            rem.insert(rem.begin(), a[i]);
+            while (rem.size() > 1 && rem.back() == 0) rem.pop_back();
+            
+            if (cmpDigits(rem, b) < 0) continue;
+            
+            // Binary search for the largest qi such that qi * b <= rem
+            long long lo = 1, hi = BASE - 1;
+            // Estimate qi
+            if ((int)rem.size() == (int)b.size()) {
+                hi = rem.back() / b.back();
+            } else if ((int)rem.size() > (int)b.size()) {
+                __int128 top = (__int128)rem.back() * BASE + rem[rem.size() - 2];
+                hi = std::min((long long)(top / b.back()), BASE - 1);
+            }
+            if (hi < lo) hi = lo;
+            
+            // Verify and adjust
+            long long qi = hi;
+            while (qi > 0) {
+                // Compute qi * b
+                std::vector<long long> product(b.size() + 1, 0);
+                __int128 carry = 0;
+                for (int j = 0; j < (int)b.size(); j++) {
+                    __int128 cur = (__int128)qi * b[j] + carry;
+                    product[j] = (long long)(cur % BASE);
+                    carry = cur / BASE;
+                }
+                if (carry > 0) product[b.size()] = (long long)carry;
+                while (product.size() > 1 && product.back() == 0) product.pop_back();
+                
+                if (cmpDigits(product, rem) <= 0) {
+                    q[i] = qi;
+                    rem = subDigits(rem, product);
+                    break;
+                }
+                qi--;
+            }
+        }
+        
+        while (q.size() > 1 && q.back() == 0) q.pop_back();
+        return q;
+    }
+    
+    // Newton's method for division: compute floor(a / b) for large numbers
+    // We compute 1/b to sufficient precision, then multiply by a
+    // 
+    // Strategy: compute floor(BASE^(2n) / b) using Newton's method,
+    // then q = floor(a * floor(BASE^(2n) / b) / BASE^(2n))
+    // adjust q by at most +-2
+    
+    // Newton iteration to compute floor(BASE^(2n) / b) where b has n digits
+    static std::vector<long long> newtonInverse(const std::vector<long long> &b, int precision) {
+        // We want to compute floor(BASE^(2*precision) / b)
+        // Start with an initial estimate
+        
+        int n = b.size();
+        if (n == 0) return {0};
+        
+        // Initial approximation: use top 1-2 digits of b
+        // x0 ≈ BASE^(2) / top_of_b
+        
+        // Start with precision = 1 and double
+        // inv ≈ BASE^(2*curPrec) / b_top
+        
+        int curPrec = 1;
+        // Initial: compute BASE^2 / b_top where b_top is the top digit(s)
+        long long b_top = b.back();
+        long long inv_init = (BASE * BASE - 1) / b_top; // floor(BASE^2 / b_top)
+        // But this might be wrong if b has more digits, so be conservative
+        // Actually for Newton to work, we need x0 such that x0 * b <= BASE^(2*curPrec)
+        // Let's just use a simple initial estimate
+        
+        std::vector<long long> x;
+        if (b_top == 0) return {0}; // shouldn't happen
+        x = {(long long)(inv_init % BASE), (long long)(inv_init / BASE)};
+        while (x.size() > 1 && x.back() == 0) x.pop_back();
+        
+        // Newton iteration: x_{n+1} = 2*x_n - x_n * x_n * b / BASE^(2*curPrec)
+        // But we need to be careful with precision doubling
+        // 
+        // Actually, let's use a simpler approach for division.
+        // For the problems at hand (up to 10^500000), we need efficient division.
+        // 
+        // Let's use the Burnikel-Ziegler recursive division approach instead.
+        
+        // Actually, for simplicity, let's use a different approach:
+        // For divisions where divisor is not too large relative to dividend,
+        // we can use schoolbook. For large divisions, use Newton.
+        
+        return x; // placeholder
+    }
+    
+    // Recursive division using Burnikel-Ziegler style
+    // For simplicity, use a hybrid approach:
+    // - Small divisors: schoolbook
+    // - Large: Newton's method
+    
+    // Actually, let me implement a clean version of Newton's method for reciprocal
+    
+    // Compute floor(B^(2k) / d) where B = BASE, d has k "digits" in base B
+    // Using Newton's method: x_{i+1} = 2*x_i - d * x_i^2 / B^(2k)
+    // Precision doubles each iteration
+    
+    static std::vector<long long> computeReciprocal(const std::vector<long long> &d) {
+        int k = d.size();
+        if (k == 0) return {0};
+        
+        // We want floor(BASE^(2k) / d)
+        // Initial estimate using top digits
+        // With precision p (number of result digits), we want floor(BASE^(2p) / d_top_p)
+        
+        // Base case: k=1
+        if (k == 1) {
+            long long val = (BASE * (long long)BASE) / d[0]; // This might overflow for BASE=10^9
+            // Use __int128
+            __int128 num = (__int128)BASE * BASE;
+            long long q = (long long)(num / d[0]);
+            return {q % BASE, q / BASE};
+        }
+        
+        // For k=2
+        if (k == 2) {
+            // floor(BASE^4 / d) where d = d[0] + d[1]*BASE
+            __int128 dval = (__int128)d[1] * BASE + d[0];
+            // BASE^4 is too large for __int128 when BASE=10^9
+            // BASE^4 = 10^36, __int128 max ~ 1.7 * 10^38, so it fits
+            __int128 num = (__int128)1;
+            for (int i = 0; i < 4; i++) num *= BASE;
+            __int128 q = num / dval;
+            std::vector<long long> result;
+            while (q > 0) {
+                result.push_back((long long)(q % BASE));
+                q /= BASE;
+            }
+            if (result.empty()) result.push_back(0);
+            return result;
+        }
+        
+        // Recursive case: compute with half precision first
+        int half = (k + 1) / 2;
+        // d_top = top half digits of d
+        std::vector<long long> d_top(d.begin() + (k - half), d.end());
+        
+        // Recursively compute floor(BASE^(2*half) / d_top)
+        auto x = computeReciprocal(d_top);
+        
+        // Now refine: x is approximately BASE^(2*half) / d_top
+        // We need floor(BASE^(2k) / d)
+        // 
+        // Newton step: x_{new} = 2 * x * BASE^(k - 2*half + k) - d * x^2 * BASE^(something)
+        // This gets complicated with the indexing. Let me use a different formulation.
+        //
+        // Let's use: we want q = floor(BASE^(2k) / d)
+        // We have x ≈ floor(BASE^(2*half) / d_top)
+        // d_top = floor(d / BASE^(k - half)), so d = d_top * BASE^(k-half) + d_low
+        // x ≈ BASE^(2*half) / d_top ≈ BASE^(2*half) / (d / BASE^(k-half)) = BASE^(2*half + k - half) / d = BASE^(k+half) / d
+        //
+        // We want BASE^(2k) / d = x * BASE^(2k - (k+half)) = x * BASE^(k - half)
+        // But x is only approximate, so we need Newton refinement.
+        //
+        // Newton iteration for f(q) = 1/q - d/BASE^(2k) = 0:
+        // q_{new} = 2*q - d*q^2/BASE^(2k)
+        //
+        // Start with q0 = x * BASE^(k - half) (shift left)
+        // But x might be slightly too large because d_top < d/BASE^(k-half)
+        
+        // Shift x to get initial q0 for full precision
+        auto q0 = shiftLeft(x, k - half);
+        
+        // Newton step: q1 = 2*q0 - d*q0^2 / BASE^(2k)
+        // = q0 * (2 - d*q0 / BASE^(2k))
+        // But we work in integer arithmetic
+        
+        // Compute d * q0
+        auto dq = mulDigits(d, q0);
+        // We want 2 - dq / BASE^(2k)
+        // = (2 * BASE^(2k) - dq) / BASE^(2k)
+        // So q1 = q0 * (2*BASE^(2k) - dq) / BASE^(2k)
+        
+        // Compute 2*BASE^(2k)
+        std::vector<long long> two_b2k(2*k + 1, 0);
+        two_b2k[2*k] = 2;
+        
+        // residual = 2*BASE^(2k) - dq
+        std::vector<long long> residual;
+        if (cmpDigits(two_b2k, dq) >= 0) {
+            residual = subDigits(two_b2k, dq);
+        } else {
+            // q0 was too large, reduce
+            residual = {0};
+        }
+        
+        // q1 = q0 * residual / BASE^(2k)
+        auto q1_full = mulDigits(q0, residual);
+        auto q1 = shiftRight(q1_full, 2*k);
+        
+        // q1 might be off by 1, verify and adjust
+        // Verify: q1 * d <= BASE^(2k)
+        auto check = mulDigits(q1, d);
+        
+        // BASE^(2k)
+        std::vector<long long> b2k(2*k + 1, 0);
+        b2k[2*k] = 1;
+        
+        // If q1 * d > BASE^(2k), decrease q1
+        while (cmpDigits(check, b2k) > 0) {
+            // q1 -= 1
+            long long borrow = 1;
+            for (int i = 0; i < (int)q1.size() && borrow; i++) {
+                q1[i] -= borrow;
+                if (q1[i] < 0) { q1[i] += BASE; borrow = 1; }
+                else borrow = 0;
+            }
+            while (q1.size() > 1 && q1.back() == 0) q1.pop_back();
+            check = mulDigits(q1, d);
+        }
+        
+        // If (q1+1) * d <= BASE^(2k), increase q1
+        {
+            auto q1p1 = addDigits(q1, {1});
+            auto chk = mulDigits(q1p1, d);
+            while (cmpDigits(chk, b2k) <= 0) {
+                q1 = q1p1;
+                q1p1 = addDigits(q1, {1});
+                chk = mulDigits(q1p1, d);
+            }
+        }
+        
+        return q1;
+    }
+    
+    // Division of positive digit vectors: floor(a / b)
+    static std::vector<long long> divDigits(const std::vector<long long> &a, const std::vector<long long> &b) {
+        int cmp = cmpDigits(a, b);
+        if (cmp < 0) return {0};
+        if (cmp == 0) return {1};
+        
+        int n = a.size(), m = b.size();
+        
+        // For small divisors, use schoolbook
+        if (m <= 100 || n - m <= 2) {
+            return divSimple(a, b);
+        }
+        
+        // For large divisors, use Newton's method
+        // Normalize: we want to compute floor(a / b)
+        // = floor(a * floor(BASE^(2m) / b) / BASE^(2m)) approximately
+        // Then adjust
+        
+        // Pad a to have the right number of digits
+        int k = m; // precision for reciprocal
+        auto recip = computeReciprocal(b);
+        
+        // q ≈ a * recip / BASE^(2k)
+        auto q_full = mulDigits(a, recip);
+        auto q = shiftRight(q_full, 2*k);
+        
+        // Verify: q * b <= a < (q+1) * b
+        auto qb = mulDigits(q, b);
+        
+        // If qb > a, decrease q
+        while (cmpDigits(qb, a) > 0) {
+            // q -= 1
+            long long borrow = 1;
+            for (int i = 0; i < (int)q.size() && borrow; i++) {
+                q[i] -= borrow;
+                if (q[i] < 0) { q[i] += BASE; borrow = 1; }
+                else borrow = 0;
+            }
+            while (q.size() > 1 && q.back() == 0) q.pop_back();
+            qb = mulDigits(q, b);
+        }
+        
+        // remainder = a - q*b
+        auto rem = subDigits(a, qb);
+        
+        // If remainder >= b, increase q
+        while (cmpDigits(rem, b) >= 0) {
+            rem = subDigits(rem, b);
+            // q += 1
+            long long carry = 1;
+            for (int i = 0; i < (int)q.size() && carry; i++) {
+                q[i] += carry;
+                if (q[i] >= BASE) { q[i] -= BASE; carry = 1; }
+                else carry = 0;
+            }
+            if (carry) q.push_back(1);
+        }
+        
+        while (q.size() > 1 && q.back() == 0) q.pop_back();
+        return q;
+    }
+
+    bool isZero() const {
+        return digits.size() == 1 && digits[0] == 0;
+    }
+
+public:
+    // Constructors
+    int2048() : digits(1, 0), negative(false) {}
+    
+    int2048(long long v) {
+        negative = false;
+        if (v < 0) {
+            negative = true;
+            // Handle LLONG_MIN carefully
+            unsigned long long uv = (unsigned long long)(-(v + 1)) + 1ULL;
+            if (uv == 0) {
+                digits.push_back(0);
+            } else {
+                while (uv > 0) {
+                    digits.push_back((long long)(uv % BASE));
+                    uv /= BASE;
+                }
+            }
+        } else if (v == 0) {
+            digits.push_back(0);
+        } else {
+            while (v > 0) {
+                digits.push_back(v % BASE);
+                v /= BASE;
+            }
+        }
+        if (digits.empty()) digits.push_back(0);
+        trim();
+    }
+    
+    int2048(const std::string &s) {
+        read(s);
+    }
+    
+    int2048(const int2048 &other) : digits(other.digits), negative(other.negative) {}
+
+    void read(const std::string &s) {
+        digits.clear();
+        negative = false;
+        
+        int start = 0;
+        if (!s.empty() && s[0] == '-') {
+            negative = true;
+            start = 1;
+        } else if (!s.empty() && s[0] == '+') {
+            start = 1;
+        }
+        
+        // Skip leading zeros
+        while (start < (int)s.size() - 1 && s[start] == '0') start++;
+        
+        // Parse from right to left, BASE_DIGITS at a time
+        int end = s.size();
+        for (int i = end; i > start; i -= BASE_DIGITS) {
+            int from = std::max(start, i - BASE_DIGITS);
+            long long val = 0;
+            for (int j = from; j < i; j++) {
+                val = val * 10 + (s[j] - '0');
+            }
+            digits.push_back(val);
+        }
+        
+        if (digits.empty()) digits.push_back(0);
+        trim();
+    }
+
+    void print() {
+        if (negative) putchar('-');
+        printf("%lld", digits.back());
+        for (int i = (int)digits.size() - 2; i >= 0; i--) {
+            printf("%09lld", digits[i]);
+        }
+    }
+
+    // Integer1 operations
+    int2048 &add(const int2048 &other) {
+        *this += other;
+        return *this;
+    }
+    
+    friend int2048 add(int2048 a, const int2048 &b) {
+        a += b;
+        return a;
+    }
+    
+    int2048 &minus(const int2048 &other) {
+        *this -= other;
+        return *this;
+    }
+    
+    friend int2048 minus(int2048 a, const int2048 &b) {
+        a -= b;
+        return a;
+    }
+
+    // Integer2 operations
+    int2048 operator+() const { return *this; }
+    
+    int2048 operator-() const {
+        int2048 result(*this);
+        if (!result.isZero())
+            result.negative = !result.negative;
+        return result;
+    }
+    
+    int2048 &operator=(const int2048 &other) {
+        if (this != &other) {
+            digits = other.digits;
+            negative = other.negative;
+        }
+        return *this;
+    }
+    
+    int2048 &operator+=(const int2048 &other) {
+        if (negative == other.negative) {
+            // Same sign: add absolute values
+            digits = addAbs(digits, other.digits);
+        } else {
+            // Different signs: subtract
+            int cmp = cmpAbs(*this, other);
+            if (cmp == 0) {
+                digits = {0};
+                negative = false;
+            } else if (cmp > 0) {
+                digits = subAbs(digits, other.digits);
+            } else {
+                digits = subAbs(other.digits, digits);
+                negative = other.negative;
+            }
+        }
+        trim();
+        return *this;
+    }
+    
+    friend int2048 operator+(int2048 a, const int2048 &b) {
+        a += b;
+        return a;
+    }
+    
+    int2048 &operator-=(const int2048 &other) {
+        // a -= b is same as a += (-b)
+        int2048 neg_other(other);
+        if (!neg_other.isZero())
+            neg_other.negative = !neg_other.negative;
+        *this += neg_other;
+        return *this;
+    }
+    
+    friend int2048 operator-(int2048 a, const int2048 &b) {
+        a -= b;
+        return a;
+    }
+    
+    int2048 &operator*=(const int2048 &other) {
+        if (isZero() || other.isZero()) {
+            digits = {0};
+            negative = false;
+            return *this;
+        }
+        bool result_neg = negative != other.negative;
+        digits = mulDigits(digits, other.digits);
+        negative = result_neg;
+        trim();
+        return *this;
+    }
+    
+    friend int2048 operator*(int2048 a, const int2048 &b) {
+        a *= b;
+        return a;
+    }
+    
+    // Division: floor division (toward negative infinity)
+    int2048 &operator/=(const int2048 &other) {
+        if (isZero()) return *this;
+        
+        bool result_neg = negative != other.negative;
+        
+        // Compute |this| / |other| (truncated toward zero)
+        auto q = divDigits(digits, other.digits);
+        
+        // For floor division: if result is negative and there's a remainder, subtract 1
+        if (result_neg) {
+            auto qb = mulDigits(q, other.digits);
+            if (cmpDigits(qb, digits) != 0) {
+                // There's a remainder, need to subtract 1 from quotient
+                q = addDigits(q, {1});
+            }
+        }
+        
+        digits = q;
+        negative = result_neg;
+        trim();
+        return *this;
+    }
+    
+    friend int2048 operator/(int2048 a, const int2048 &b) {
+        a /= b;
+        return a;
+    }
+    
+    // Modulo: x % y = x - (x / y) * y
+    int2048 &operator%=(const int2048 &other) {
+        int2048 q = *this / other;
+        *this -= q * other;
+        return *this;
+    }
+    
+    friend int2048 operator%(int2048 a, const int2048 &b) {
+        a %= b;
+        return a;
+    }
+    
+    friend std::istream &operator>>(std::istream &is, int2048 &v) {
+        std::string s;
+        is >> s;
+        v.read(s);
+        return is;
+    }
+    
+    friend std::ostream &operator<<(std::ostream &os, const int2048 &v) {
+        if (v.negative) os << '-';
+        os << v.digits.back();
+        char prev_fill = os.fill('0');
+        auto prev_w = os.width();
+        for (int i = (int)v.digits.size() - 2; i >= 0; i--) {
+            os.width(BASE_DIGITS);
+            os << v.digits[i];
+        }
+        os.fill(prev_fill);
+        os.width(prev_w);
+        return os;
+    }
+    
+    friend bool operator==(const int2048 &a, const int2048 &b) {
+        return a.negative == b.negative && a.digits == b.digits;
+    }
+    
+    friend bool operator!=(const int2048 &a, const int2048 &b) {
+        return !(a == b);
+    }
+    
+    friend bool operator<(const int2048 &a, const int2048 &b) {
+        if (a.negative != b.negative) return a.negative;
+        if (a.negative) return a.cmpAbs(b) > 0; // both negative: larger abs is smaller
+        return a.cmpAbs(b) < 0;
+    }
+    
+    friend bool operator>(const int2048 &a, const int2048 &b) { return b < a; }
+    friend bool operator<=(const int2048 &a, const int2048 &b) { return !(b < a); }
+    friend bool operator>=(const int2048 &a, const int2048 &b) { return !(a < b); }
+};
+
+} // namespace sjtu
+
+#endif
