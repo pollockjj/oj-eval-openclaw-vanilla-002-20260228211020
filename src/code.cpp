@@ -260,74 +260,51 @@ private:
     }
     
     // Newton's method to compute floor(B^{2m} / b)
-    // We iterate: x_{k+1} = 2*x_k - floor(b * x_k^2 / B^{2m})
-    // Working at full precision throughout (using b, not truncated b).
-    // Start with a rough estimate and iterate until convergence.
+    // Uses precision doubling: at step k, work with precision p_k
+    // and use truncated b to reduce computation at early stages.
     static std::vector<long long> newtonRecip(const std::vector<long long> &b, int m) {
-        // Initial estimate: use top 2 digits for better accuracy
-        __int128 b_top;
-        if (m >= 2) {
-            b_top = (__int128)b[m-1] * BASE + b[m-2];
+        // Base case: for small m, use schoolbook
+        if (m <= 64) {
+            std::vector<long long> num(2*m+1, 0);
+            num[2*m] = 1;
+            return divSchool(num, b);
+        }
+        
+        // Recursive: compute at half precision, then Newton refine
+        int half = (m + 1) / 2;
+        // b_hi = top half digits of b
+        std::vector<long long> b_hi(b.begin() + (m - half), b.end());
+        
+        // Get x_half ≈ B^{2*half} / b_hi
+        auto x_half = newtonRecip(b_hi, half);
+        
+        // Lift: x = x_half * B^{m - half}
+        // x_half ≈ B^{2*half} / b_hi
+        // b ≈ b_hi * B^{m-half}
+        // => x = x_half * B^{m-half} ≈ B^{2*half+m-half} / b_hi ≈ B^{m+half} / (b/B^{m-half})
+        //      = B^{m+half+m-half} / b = B^{2m} / b
+        // Wait: B^{2*half}/(b_hi) * B^{m-half} = B^{half+m} / b_hi
+        // And b_hi ≈ b / B^{m-half}, so this ≈ B^{half+m} * B^{m-half} / b = B^{2m} / b. Correct!
+        
+        auto x = shiftLeft(x_half, m - half);
+        
+        // One Newton step at full precision:
+        // x' = 2*x - floor(b * x^2 / B^{2m})
+        // = floor(x * (2*B^{2m} - b*x) / B^{2m})
+        auto bx = mulDigits(b, x);
+        
+        std::vector<long long> two_B(2*m+1, 0);
+        two_B[2*m] = 2;
+        
+        std::vector<long long> residual;
+        if (cmpAbs(two_B, bx) > 0) {
+            residual = subAbs(two_B, bx);
         } else {
-            b_top = b[m-1];
+            residual = {0};
         }
         
-        // x0 ≈ B^{2m} / b ≈ B^{2m} / (b_top * B^{m-2}) = B^{m+2} / b_top (if m >= 2)
-        // or B^{2m} / (b_top * B^{m-1}) = B^{m+1} / b_top (if m == 1)
-        
-        // Actually, let's compute x0 more carefully.
-        // B^{2m} / b. b ≈ b_top_k * B^{m-k} where b_top_k uses top k digits.
-        // So B^{2m}/b ≈ B^{m+k}/b_top_k
-        // For k=2: B^{m+2}/b_top_2
-        
-        // x0 = floor(B^4 / b_top_2) * B^{m-2} (for m >= 2)
-        __int128 x0_high;
-        int x0_shift;
-        if (m >= 2) {
-            // B^4 / b_top_2 where b_top_2 = b[m-1]*B + b[m-2]
-            // B^4 = 10^36, fits in __int128
-            __int128 B4 = (__int128)BASE * BASE * BASE * BASE;
-            x0_high = B4 / b_top;
-            x0_shift = m - 2;
-        } else {
-            __int128 B2 = (__int128)BASE * BASE;
-            x0_high = B2 / b_top;
-            x0_shift = 0;
-        }
-        
-        // Convert x0_high to digit vector
-        std::vector<long long> x;
-        {
-            __int128 v = x0_high;
-            if (v == 0) x.push_back(0);
-            else while (v > 0) { x.push_back((long long)(v % BASE)); v /= BASE; }
-        }
-        if (x0_shift > 0) x = shiftLeft(x, x0_shift);
-        
-        // Newton iterations: x = 2*x - floor(b * x^2 / B^{2m})
-        // We iterate until convergence (x doesn't change)
-        for (int iter = 0; iter < 100; iter++) {
-            auto bx = mulDigits(b, x);
-            // bx should be close to B^{2m}
-            // 2*B^{2m} - bx
-            std::vector<long long> two_B(2*m+1, 0);
-            two_B[2*m] = 2;
-            
-            std::vector<long long> residual;
-            if (cmpAbs(two_B, bx) > 0) {
-                residual = subAbs(two_B, bx);
-            } else {
-                // bx >= 2*B^{2m}: x is too large
-                // Set residual = 0 and fall back
-                residual = {0};
-            }
-            
-            auto x_full = mulDigits(x, residual);
-            auto x_new = shiftRight(x_full, 2*m);
-            
-            if (cmpAbs(x_new, x) == 0 || (x_new.size() == 1 && x_new[0] == 0)) break;
-            x = x_new;
-        }
+        auto x_full = mulDigits(x, residual);
+        x = shiftRight(x_full, 2*m);
         
         // Final adjustment: ensure x * b <= B^{2m} < (x+1) * b
         auto check = mulDigits(x, b);
@@ -355,30 +332,7 @@ private:
         
         int m = b.size();
         
-        if (m <= 500) {
-            return divSchool(a, b);
-        }
-        
-        // Newton-based
-        auto inv = newtonRecip(b, m);
-        auto q_full = mulDigits(a, inv);
-        auto q = shiftRight(q_full, 2*m);
-        
-        auto qb = mulDigits(q, b);
-        
-        while (cmpAbs(qb, a) > 0) {
-            q = subAbs(q, {1});
-            qb = subAbs(qb, b);
-        }
-        
-        auto rem = subAbs(a, qb);
-        while (cmpAbs(rem, b) >= 0) {
-            rem = subAbs(rem, b);
-            q = addAbs(q, {1});
-        }
-        
-        trimV(q);
-        return q;
+        return divSchool(a, b);
     }
 
     void doAdd(const int2048 &other) {
